@@ -17,6 +17,7 @@ module ActionSubscriber
                   :port,
                   :prefetch,
                   :resubscribe_on_consumer_cancellation,
+                  :route_config,
                   :seconds_to_wait_for_graceful_shutdown,
                   :threadpool_size,
                   :timeout,
@@ -44,6 +45,7 @@ module ActionSubscriber
       :port => 5672,
       :prefetch => 2,
       :resubscribe_on_consumer_cancellation => true,
+      :route_config => nil,
       :seconds_to_wait_for_graceful_shutdown => 30,
       :threadpool_size => 8,
       :timeout => 1,
@@ -80,6 +82,55 @@ module ActionSubscriber
             exists, setting = fetch_config_value(key, cli_options, yaml_config)
             ::ActionSubscriber.config.__send__("#{key}=", setting) if exists
           end
+
+          # Configure routes from yaml if a route config is provided
+          #
+          # ```yaml
+          # routes:
+          #   - default_routes_for: AccountSubscriber
+          #     prefetch: 100
+          #   - default_routes_for: BeatSubscriber
+          # thread_pools:
+          #   - name: analytics_events
+          #     size: 20
+          #     routes:
+          #       - default_routes_for: AnalyticsEventSubscriber
+          #         prefetch: 100
+          #       - default_routes_for: AnalyticsPageviewSubscriber
+          #         prefetch: 100
+          # ```
+          if @route_config != nil
+            absolute_config_path = ::File.expand_path(::File.join("config", @route_config))
+
+            if ::File.exists?(absolute_config_path)
+              erb = ::ERB.new(::File.read(absolute_config_path)).result
+              if defined?(SafeYAML)
+                yaml_config = ::YAML.load(erb, :safe => true)
+              else
+                yaml_config = ::YAML.load(erb)
+              end
+            end
+
+            ::ActionSubscriber.draw_routes do
+              config_route = lambda do |route|
+                route.each_pair do |froute, klass|
+                  case froute
+                  when 'default_routes_for'
+                    default_routes_for "::#{klass}".constantize, *route.slice(:default_routes_for)
+                  end
+                end
+              end
+
+              yaml_config[:routes].each(&config_route)
+
+              yaml_config[:thread_pools].each do |pool|
+                threadpool(pool[:name].to_sym, :threadpool_size => pool[:size]) do
+                  pool[:routes].each(&config_route)
+                end
+              end
+
+            end
+          end # routeconfig
 
           true
         end
